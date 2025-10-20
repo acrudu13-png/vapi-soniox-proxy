@@ -21,11 +21,22 @@ class SonioxTranscriptionService extends EventEmitter {
     this.ws = null;
     this.messageQueue = [];
     this.ready = false;
-    this.finalTranscript = ''; // Committed finals
-    this.partialTranscript = ''; // Current partial hypothesis
-    this.lastSentPartial = ''; // For incremental partial sends
+    this.finalTranscript = '';
+    this.partialTranscript = '';
+    this.lastSentPartial = '';
     this.debounceTimer = null;
     this.debounceDelay = 3000;
+  }
+
+  buildText(tokens) {
+    let text = '';
+    for (const token of tokens) {
+      if (text && !text.endsWith(' ') && !token.text.match(/^[.,?!:;]/)) {
+        text += ' ';
+      }
+      text += token.text;
+    }
+    return text.replace(/\s+/g, ' ').trim();
   }
 
   connect() {
@@ -64,42 +75,24 @@ class SonioxTranscriptionService extends EventEmitter {
         return;
       }
       if (message.tokens) {
-        let hasFinal = false;
-        let newFinalText = '';
+        const finalTokens = message.tokens.filter(token => token.is_final);
+        const partialTokens = message.tokens.filter(token => !token.is_final);
 
-        // Process all tokens in the batch
-        for (const token of message.tokens) {
-          if (token.is_final) {
-            // Append to finals with smart spacing
-            if (token.text.match(/^[.,?!:;]/)) {
-              // Punctuation: append directly
-              newFinalText += token.text;
-            } else {
-              // Normal: add space if needed
-              if (newFinalText && !newFinalText.endsWith(' ')) {
-                newFinalText += ' ';
-              }
-              newFinalText += token.text;
-            }
-            hasFinal = true;
-          } else {
-            // Overwrite partial hypothesis (Soniox partials replace the current unfinalized segment)
-            this.partialTranscript += (this.partialTranscript ? ' ' : '') + token.text; // Build partial
-          }
-        }
+        const newFinalText = this.buildText(finalTokens);
+        const newPartialText = this.buildText(partialTokens);
+
+        let hasFinal = finalTokens.length > 0;
 
         if (hasFinal) {
-          // Commit new finals, normalize, and send incremental (new finals + current partial)
           this.finalTranscript += (this.finalTranscript ? ' ' : '') + newFinalText;
-          let toSend = newFinalText + (this.partialTranscript ? ' ' + this.partialTranscript : '');
-          toSend = toSend.replace(/\s+/g, ' ').trim(); // Normalize whitespace
+          let toSend = newFinalText + (newPartialText ? ' ' + newPartialText : '');
+          toSend = toSend.replace(/\s+/g, ' ').trim();
           this.emit('transcription', toSend, this.channel);
-          // Reset partial after final (as finals commit the segment)
-          this.partialTranscript = '';
-          this.lastSentPartial = '';
+          this.partialTranscript = newPartialText;
+          this.lastSentPartial = newPartialText;
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
-        } else if (this.partialTranscript) {
-          // Debounce partials: Send only incremental added text
+        } else if (partialTokens.length > 0) {
+          this.partialTranscript = newPartialText; // Replace previous partial
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
           this.debounceTimer = setTimeout(() => {
             const normalizedPartial = this.partialTranscript.replace(/\s+/g, ' ').trim();
