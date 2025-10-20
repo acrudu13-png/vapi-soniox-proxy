@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3001;
 const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const SONIOX_MODEL = 'stt-rt-preview-v2'; // Updated to v2 for better performance (from Soniox examples)
-const LANGUAGE = 'en'; // Change if needed
+const LANGUAGE = 'ro'; // Change if needed
 
 class SonioxTranscriptionService extends EventEmitter {
   constructor(channel) {
