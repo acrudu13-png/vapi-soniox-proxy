@@ -11,24 +11,26 @@ const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3001;
 const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
-const SONIOX_MODEL = 'stt-rt-preview-v2'; // Updated to v2 for better performance (from Soniox examples)
-const LANGUAGE = 'ro'; // Change if needed
+const SONIOX_MODEL = 'stt-rt-preview-v2';
+const LANGUAGE = 'ro'; // Romanian
 
 class SonioxTranscriptionService extends EventEmitter {
   constructor(channel) {
     super();
-    this.channel = channel; // 'customer' or 'assistant'
+    this.channel = channel;
     this.ws = null;
-    this.messageQueue = []; // Buffer for audio data
+    this.messageQueue = [];
     this.ready = false;
-    this.transcriptBuffer = '';
+    this.finalTranscript = ''; // Committed finals
+    this.partialTranscript = ''; // Current partial hypothesis
+    this.lastSentPartial = ''; // For incremental partial sends
     this.debounceTimer = null;
-    this.debounceDelay = 3000; // 3 seconds
+    this.debounceDelay = 3000;
   }
 
   connect() {
     if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
-      return; // Avoid multiple connects
+      return;
     }
 
     this.ws = new WebSocket(SONIOX_WS_URL);
@@ -42,12 +44,9 @@ class SonioxTranscriptionService extends EventEmitter {
         sample_rate: 16000,
         num_channels: 1,
         language_hints: [LANGUAGE]
-        // Add more options if needed
       };
       this.ws.send(JSON.stringify(config));
       this.ready = true;
-
-      // Process queued audio
       while (this.messageQueue.length > 0) {
         this.send(this.messageQueue.shift());
       }
@@ -55,34 +54,68 @@ class SonioxTranscriptionService extends EventEmitter {
 
     this.ws.on('message', (data) => {
       const message = JSON.parse(data);
-      if (message.tokens) {
-        const newText = message.tokens
-          .filter(token => token.text)
-          .map(token => token.text)
-          .join(' ');
-        if (newText) {
-          this.transcriptBuffer += (this.transcriptBuffer ? ' ' : '') + newText;
-        }
-        if (message.tokens.some(token => token.is_final)) {
-          this.emitTranscription();
-        } else {
-          if (this.debounceTimer) clearTimeout(this.debounceTimer);
-          this.debounceTimer = setTimeout(() => this.emitTranscription(), this.debounceDelay);
-        }
-      }
-      if (message.finished) {
-        this.ws.close();
-      }
       if (message.error_code) {
         console.error(`Soniox error for ${this.channel}: ${message.error_message}`);
         this.ws.close();
+        return;
+      }
+      if (message.finished) {
+        this.ws.close();
+        return;
+      }
+      if (message.tokens) {
+        let hasFinal = false;
+        let newFinalText = '';
+
+        // Process all tokens in the batch
+        for (const token of message.tokens) {
+          if (token.is_final) {
+            // Append to finals with smart spacing
+            if (token.text.match(/^[.,?!:;]/)) {
+              // Punctuation: append directly
+              newFinalText += token.text;
+            } else {
+              // Normal: add space if needed
+              if (newFinalText && !newFinalText.endsWith(' ')) {
+                newFinalText += ' ';
+              }
+              newFinalText += token.text;
+            }
+            hasFinal = true;
+          } else {
+            // Overwrite partial hypothesis (Soniox partials replace the current unfinalized segment)
+            this.partialTranscript += (this.partialTranscript ? ' ' : '') + token.text; // Build partial
+          }
+        }
+
+        if (hasFinal) {
+          // Commit new finals, normalize, and send incremental (new finals + current partial)
+          this.finalTranscript += (this.finalTranscript ? ' ' : '') + newFinalText;
+          let toSend = newFinalText + (this.partialTranscript ? ' ' + this.partialTranscript : '');
+          toSend = toSend.replace(/\s+/g, ' ').trim(); // Normalize whitespace
+          this.emit('transcription', toSend, this.channel);
+          // Reset partial after final (as finals commit the segment)
+          this.partialTranscript = '';
+          this.lastSentPartial = '';
+          if (this.debounceTimer) clearTimeout(this.debounceTimer);
+        } else if (this.partialTranscript) {
+          // Debounce partials: Send only incremental added text
+          if (this.debounceTimer) clearTimeout(this.debounceTimer);
+          this.debounceTimer = setTimeout(() => {
+            const normalizedPartial = this.partialTranscript.replace(/\s+/g, ' ').trim();
+            const added = normalizedPartial.substring(this.lastSentPartial.length).trim();
+            if (added) {
+              this.emit('transcription', added, this.channel);
+              this.lastSentPartial = normalizedPartial;
+            }
+          }, this.debounceDelay);
+        }
       }
     });
 
     this.ws.on('close', () => {
       console.log(`Soniox WS closed for ${this.channel}`);
       this.ready = false;
-      // Attempt reconnect if queue has data
       if (this.messageQueue.length > 0) {
         setTimeout(() => this.connect(), 1000);
       }
@@ -91,7 +124,6 @@ class SonioxTranscriptionService extends EventEmitter {
     this.ws.on('error', (err) => {
       console.error(`Soniox WS error for ${this.channel}: ${err}`);
       this.ready = false;
-      // Reconnect after delay
       setTimeout(() => this.connect(), 1000);
     });
   }
@@ -105,14 +137,6 @@ class SonioxTranscriptionService extends EventEmitter {
         this.connect();
       }
     }
-  }
-
-  emitTranscription() {
-    if (this.transcriptBuffer) {
-      this.emit('transcription', this.transcriptBuffer, this.channel);
-      this.transcriptBuffer = '';
-    }
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
   }
 
   close() {
@@ -138,12 +162,11 @@ wss.on('connection', (ws) => {
         console.error('JSON parse error:', err);
       }
     } else if (Buffer.isBuffer(message)) {
-      // Deinterleave stereo audio (linear16, interleaved: channel0, channel1)
       const customerAudio = Buffer.alloc(message.length / 2);
       const assistantAudio = Buffer.alloc(message.length / 2);
       for (let i = 0; i < message.length / 4; i++) {
-        message.copy(customerAudio, i * 2, i * 4); // Bytes 0-1: channel 0 (customer)
-        message.copy(assistantAudio, i * 2, i * 4 + 2); // Bytes 2-3: channel 1 (assistant)
+        message.copy(customerAudio, i * 2, i * 4);
+        message.copy(assistantAudio, i * 2, i * 4 + 2);
       }
       customerService.send(customerAudio);
       assistantService.send(assistantAudio);
