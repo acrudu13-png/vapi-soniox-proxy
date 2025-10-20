@@ -23,26 +23,20 @@ class SonioxTranscriptionService extends EventEmitter {
     this.ready = false;
     this.finalTranscript = '';
     this.partialTranscript = '';
-    this.lastSentTranscript = ''; // For delta calculation
+    this.lastSentTranscript = '';
     this.debounceTimer = null;
     this.debounceDelay = 3000;
   }
 
   buildText(tokens) {
-    let text = '';
-    for (const token of tokens) {
-      if (text && !text.endsWith(' ') && !token.text.match(/^[.,?!:;]/)) {
-        text += ' ';
-      }
-      text += token.text;
-    }
-    return text.replace(/\s+/g, ' ').trim();
+    // Direct concatenation without added spaces; normalize whitespace after
+    return tokens.map(token => token.text).join('').replace(/\s+/g, ' ').trim();
   }
 
   getFullCurrent() {
     let full = this.finalTranscript;
     if (this.partialTranscript) {
-      full += (full ? ' ' : '') + this.partialTranscript;
+      full += this.partialTranscript; // No space, as partial may continue the word
     }
     return full.replace(/\s+/g, ' ').trim();
   }
@@ -101,15 +95,15 @@ class SonioxTranscriptionService extends EventEmitter {
         let hasFinal = finalTokens.length > 0;
 
         if (hasFinal) {
-          this.finalTranscript += (this.finalTranscript ? ' ' : '') + newFinalText;
-          this.partialTranscript = newPartialText; // Replace partial
-          this.emitDelta(); // Send immediate delta
+          this.finalTranscript += newFinalText; // Append directly
+          this.partialTranscript = newPartialText;
+          this.emitDelta();
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
         } else if (partialTokens.length > 0) {
-          this.partialTranscript = newPartialText; // Replace previous partial
+          this.partialTranscript = newPartialText; // Replace
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
           this.debounceTimer = setTimeout(() => {
-            this.emitDelta(); // Send debounced delta
+            this.emitDelta();
           }, this.debounceDelay);
         }
       }
