@@ -23,7 +23,7 @@ class SonioxTranscriptionService extends EventEmitter {
     this.ready = false;
     this.finalTranscript = '';
     this.partialTranscript = '';
-    this.lastSentPartial = '';
+    this.lastSentTranscript = ''; // For delta calculation
     this.debounceTimer = null;
     this.debounceDelay = 3000;
   }
@@ -37,6 +37,23 @@ class SonioxTranscriptionService extends EventEmitter {
       text += token.text;
     }
     return text.replace(/\s+/g, ' ').trim();
+  }
+
+  getFullCurrent() {
+    let full = this.finalTranscript;
+    if (this.partialTranscript) {
+      full += (full ? ' ' : '') + this.partialTranscript;
+    }
+    return full.replace(/\s+/g, ' ').trim();
+  }
+
+  emitDelta() {
+    const fullCurrent = this.getFullCurrent();
+    const added = fullCurrent.substring(this.lastSentTranscript.length).trim();
+    if (added) {
+      this.emit('transcription', added, this.channel);
+      this.lastSentTranscript = fullCurrent;
+    }
   }
 
   connect() {
@@ -85,22 +102,14 @@ class SonioxTranscriptionService extends EventEmitter {
 
         if (hasFinal) {
           this.finalTranscript += (this.finalTranscript ? ' ' : '') + newFinalText;
-          let toSend = newFinalText + (newPartialText ? ' ' + newPartialText : '');
-          toSend = toSend.replace(/\s+/g, ' ').trim();
-          this.emit('transcription', toSend, this.channel);
-          this.partialTranscript = newPartialText;
-          this.lastSentPartial = newPartialText;
+          this.partialTranscript = newPartialText; // Replace partial
+          this.emitDelta(); // Send immediate delta
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
         } else if (partialTokens.length > 0) {
           this.partialTranscript = newPartialText; // Replace previous partial
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
           this.debounceTimer = setTimeout(() => {
-            const normalizedPartial = this.partialTranscript.replace(/\s+/g, ' ').trim();
-            const added = normalizedPartial.substring(this.lastSentPartial.length).trim();
-            if (added) {
-              this.emit('transcription', added, this.channel);
-              this.lastSentPartial = normalizedPartial;
-            }
+            this.emitDelta(); // Send debounced delta
           }, this.debounceDelay);
         }
       }
