@@ -11,7 +11,7 @@ const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3001;
 const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
-const SONIOX_MODEL = 'stt-rt-preview'; // Use 'stt-rt-preview' or another model from Soniox docs
+const SONIOX_MODEL = 'stt-rt-preview-v2'; // Updated to v2 for better performance (from Soniox examples)
 const LANGUAGE = 'en'; // Change if needed
 
 class SonioxTranscriptionService extends EventEmitter {
@@ -19,15 +19,18 @@ class SonioxTranscriptionService extends EventEmitter {
     super();
     this.channel = channel; // 'customer' or 'assistant'
     this.ws = null;
-    this.buffer = Buffer.alloc(0);
+    this.messageQueue = []; // Buffer for audio data
+    this.ready = false;
     this.transcriptBuffer = '';
     this.debounceTimer = null;
-    this.retryAttempts = 0;
-    this.maxRetries = 3;
     this.debounceDelay = 3000; // 3 seconds
   }
 
   connect() {
+    if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+      return; // Avoid multiple connects
+    }
+
     this.ws = new WebSocket(SONIOX_WS_URL);
 
     this.ws.on('open', () => {
@@ -39,10 +42,15 @@ class SonioxTranscriptionService extends EventEmitter {
         sample_rate: 16000,
         num_channels: 1,
         language_hints: [LANGUAGE]
-        // Add more options like enable_language_identification: true if needed
+        // Add more options if needed
       };
       this.ws.send(JSON.stringify(config));
-      this.retryAttempts = 0;
+      this.ready = true;
+
+      // Process queued audio
+      while (this.messageQueue.length > 0) {
+        this.send(this.messageQueue.shift());
+      }
     });
 
     this.ws.on('message', (data) => {
@@ -58,7 +66,6 @@ class SonioxTranscriptionService extends EventEmitter {
         if (message.tokens.some(token => token.is_final)) {
           this.emitTranscription();
         } else {
-          // Debounce interim results
           if (this.debounceTimer) clearTimeout(this.debounceTimer);
           this.debounceTimer = setTimeout(() => this.emitTranscription(), this.debounceDelay);
         }
@@ -72,22 +79,31 @@ class SonioxTranscriptionService extends EventEmitter {
       }
     });
 
-    this.ws.on('close', () => console.log(`Soniox WS closed for ${this.channel}`));
-    this.ws.on('error', (err) => console.error(`Soniox WS error for ${this.channel}: ${err}`));
+    this.ws.on('close', () => {
+      console.log(`Soniox WS closed for ${this.channel}`);
+      this.ready = false;
+      // Attempt reconnect if queue has data
+      if (this.messageQueue.length > 0) {
+        setTimeout(() => this.connect(), 1000);
+      }
+    });
+
+    this.ws.on('error', (err) => {
+      console.error(`Soniox WS error for ${this.channel}: ${err}`);
+      this.ready = false;
+      // Reconnect after delay
+      setTimeout(() => this.connect(), 1000);
+    });
   }
 
   send(data) {
-    this.buffer = Buffer.concat([this.buffer, data]);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(this.buffer);
-      this.buffer = Buffer.alloc(0);
-      this.retryAttempts = 0;
-    } else if (this.retryAttempts < this.maxRetries) {
-      this.retryAttempts++;
-      setTimeout(() => this.send(Buffer.alloc(0)), 1000); // Retry connect
-      this.connect();
+    if (this.ready && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
     } else {
-      console.error(`Max retries reached for ${this.channel}`);
+      this.messageQueue.push(data);
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        this.connect();
+      }
     }
   }
 
@@ -100,7 +116,7 @@ class SonioxTranscriptionService extends EventEmitter {
   }
 
   close() {
-    if (this.ws) this.ws.send(''); // Send empty to finish
+    if (this.ws) this.ws.close();
   }
 }
 
@@ -117,18 +133,17 @@ wss.on('connection', (ws) => {
         const data = JSON.parse(message);
         if (data.type === 'start') {
           console.log('Start message received:', data);
-          // Audio params: linear16, 16000Hz, 2 channels
         }
       } catch (err) {
         console.error('JSON parse error:', err);
       }
     } else if (Buffer.isBuffer(message)) {
-      // Deinterleave stereo audio (assuming interleaved: channel0, channel1)
+      // Deinterleave stereo audio (linear16, interleaved: channel0, channel1)
       const customerAudio = Buffer.alloc(message.length / 2);
       const assistantAudio = Buffer.alloc(message.length / 2);
       for (let i = 0; i < message.length / 4; i++) {
-        message.copy(customerAudio, i * 2, i * 4); // Bytes 0-1: channel 0
-        message.copy(assistantAudio, i * 2, i * 4 + 2); // Bytes 2-3: channel 1
+        message.copy(customerAudio, i * 2, i * 4); // Bytes 0-1: channel 0 (customer)
+        message.copy(assistantAudio, i * 2, i * 4 + 2); // Bytes 2-3: channel 1 (assistant)
       }
       customerService.send(customerAudio);
       assistantService.send(assistantAudio);
