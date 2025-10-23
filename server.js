@@ -11,7 +11,7 @@ const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3001;
 const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
-const SONIOX_MODEL = 'stt-rt-preview-v2';
+const SONIOX_MODEL = 'stt-rt-v3';
 const LANGUAGE = 'ro'; // Romanian
 
 class SonioxTranscriptionService extends EventEmitter {
